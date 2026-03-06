@@ -69,6 +69,7 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 	toolCalls := make(map[string]*responsesToolCallAcc) // keyed by item_id
 
 	scanner := bufio.NewScanner(respBody)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line for large tool call / thinking chunks
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -133,16 +134,21 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 				}
 			}
 
-		case "response.completed":
-			if event.Response != nil && event.Response.Usage != nil {
-				u := event.Response.Usage
-				result.Usage = &Usage{
-					PromptTokens:     u.InputTokens,
-					CompletionTokens: u.OutputTokens,
-					TotalTokens:      u.TotalTokens,
+		case "response.completed", "response.incomplete", "response.failed":
+			if event.Response != nil {
+				if event.Response.Usage != nil {
+					u := event.Response.Usage
+					result.Usage = &Usage{
+						PromptTokens:     u.InputTokens,
+						CompletionTokens: u.OutputTokens,
+						TotalTokens:      u.TotalTokens,
+					}
+					if u.OutputTokensDetails != nil {
+						result.Usage.ThinkingTokens = u.OutputTokensDetails.ReasoningTokens
+					}
 				}
-				if u.OutputTokensDetails != nil {
-					result.Usage.ThinkingTokens = u.OutputTokensDetails.ReasoningTokens
+				if event.Response.Status == "incomplete" {
+					result.FinishReason = "length"
 				}
 			}
 		}
@@ -229,15 +235,11 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 			if len(m.ToolCalls) > 0 {
 				for _, tc := range m.ToolCalls {
 					argsJSON, _ := json.Marshal(tc.Arguments)
-					// Responses API requires "id" to start with "fc_"; call_id is the tool call ID.
-					itemID := tc.ID
-					if !strings.HasPrefix(itemID, "fc") {
-						itemID = "fc_" + tc.ID
-					}
+					callID := toFcID(tc.ID)
 					input = append(input, map[string]interface{}{
 						"type":      "function_call",
-						"id":        itemID,
-						"call_id":   tc.ID,
+						"id":        callID,
+						"call_id":   callID,
 						"name":      tc.Name,
 						"arguments": string(argsJSON),
 					})
@@ -256,11 +258,10 @@ func (p *CodexProvider) buildRequestBody(req ChatRequest, stream bool) map[strin
 
 		case "tool":
 			// Tool results → function_call_output items
-			output := m.Content
 			input = append(input, map[string]interface{}{
 				"type":    "function_call_output",
-				"call_id": m.ToolCallID,
-				"output":  output,
+				"call_id": toFcID(m.ToolCallID),
+				"output":  m.Content,
 			})
 		}
 	}
@@ -386,6 +387,20 @@ func (p *CodexProvider) parseResponse(resp *responsesAPIResponse) *ChatResponse 
 	}
 
 	return result
+}
+
+// toFcID ensures a tool call ID starts with "fc_" as required by the Responses API.
+func toFcID(id string) string {
+	if strings.HasPrefix(id, "fc_") {
+		return id
+	}
+	if strings.HasPrefix(id, "tool_") {
+		return "fc_" + id[len("tool_"):]
+	}
+	if strings.HasPrefix(id, "call_") {
+		return "fc_" + id[len("call_"):]
+	}
+	return "fc_" + id
 }
 
 // --- Wire types for the Responses API ---
