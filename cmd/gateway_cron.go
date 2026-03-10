@@ -19,6 +19,25 @@ import (
 // and integration with /stop, /stopall commands.
 func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager) func(job *store.CronJob) (*store.CronJobResult, error) {
 	return func(job *store.CronJob) (*store.CronJobResult, error) {
+		peerKind := resolveCronPeerKind(job)
+
+		// Direct delivery: send Payload.Message straight to the channel without agent processing.
+		// This is the correct behavior for reminders/notifications — bot sends one message directly.
+		if job.Payload.Deliver && job.Payload.Channel != "" && job.Payload.To != "" {
+			outMsg := bus.OutboundMessage{
+				Channel: job.Payload.Channel,
+				ChatID:  job.Payload.To,
+				Content: job.Payload.Message,
+			}
+			if peerKind == "group" {
+				outMsg.Metadata = map[string]string{"group_id": job.Payload.To}
+			}
+			msgBus.PublishOutbound(outMsg)
+
+			return &store.CronJobResult{Content: job.Payload.Message}, nil
+		}
+
+		// Agent processing: route through scheduler for LLM-powered cron tasks.
 		agentID := job.AgentID
 		if agentID == "" {
 			agentID = cfg.ResolveDefaultAgentID()
@@ -32,14 +51,8 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			channel = "cron"
 		}
 
-		// Infer peer kind from the stored session metadata (group chats need it
-		// so that tools like message can route correctly via group APIs).
-		peerKind := resolveCronPeerKind(job)
-
-		// Resolve channel type for system prompt context.
 		channelType := resolveChannelType(channelMgr, channel)
 
-		// Schedule through cron lane — scheduler handles agent resolution and concurrency
 		outCh := sched.Schedule(context.Background(), scheduler.LaneCron, agent.RunRequest{
 			SessionKey:  sessionKey,
 			Message:     job.Payload.Message,
@@ -54,28 +67,12 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			TraceTags:   []string{"cron"},
 		})
 
-		// Block until the scheduled run completes
 		outcome := <-outCh
 		if outcome.Err != nil {
 			return nil, outcome.Err
 		}
 
 		result := outcome.Result
-
-		// If job wants delivery to a channel, send the agent response to the target chat.
-		if job.Payload.Deliver && job.Payload.Channel != "" && job.Payload.To != "" {
-			outMsg := bus.OutboundMessage{
-				Channel: job.Payload.Channel,
-				ChatID:  job.Payload.To,
-				Content: result.Content,
-			}
-			if peerKind == "group" {
-				outMsg.Metadata = map[string]string{"group_id": job.Payload.To}
-			}
-			appendMediaToOutbound(&outMsg, result.Media)
-			msgBus.PublishOutbound(outMsg)
-		}
-
 		cronResult := &store.CronJobResult{
 			Content: result.Content,
 		}
