@@ -247,17 +247,13 @@ func (t *CronTool) handleAdd(ctx context.Context, args map[string]any, agentID, 
 	// Auto-fill channel and to from context when deliver is requested.
 	// Always prefer context values over LLM-provided values to prevent
 	// misrouted deliveries (e.g. LLM confusing guild ID with channel ID).
-	if ctxChannel := ToolChannelFromCtx(ctx); ctxChannel != "" {
-		channel = ctxChannel
-	}
-	if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
-		to = ctxChatID
-	}
-
-	// Default deliver=true when created from a chat context (channel + to available).
-	// This ensures reminders are sent directly as bot messages, not routed through the agent.
-	if !deliver && channel != "" && to != "" {
-		deliver = true
+	if deliver {
+		if ctxChannel := ToolChannelFromCtx(ctx); ctxChannel != "" {
+			channel = ctxChannel
+		}
+		if ctxChatID := ToolChatIDFromCtx(ctx); ctxChatID != "" {
+			to = ctxChatID
+		}
 	}
 
 	// Use agent ID from job object if explicitly provided, otherwise from context
