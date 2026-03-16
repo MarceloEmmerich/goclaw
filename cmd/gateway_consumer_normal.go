@@ -44,7 +44,7 @@ func processNormalMessage(
 	}
 
 	// Check handoff routing override
-	if teamStore != nil && msg.AgentID == "" {
+	if teamStore != nil {
 		if route, _ := teamStore.GetHandoffRoute(ctx, msg.Channel, msg.ChatID); route != nil {
 			agentID = route.ToAgentKey
 			slog.Info("inbound: handoff route active",
